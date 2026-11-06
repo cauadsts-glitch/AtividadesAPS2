@@ -1,0 +1,30 @@
+C4Container
+    title Marketplace B2B de Sobras - Visão de Contêineres (C4 Nível 2) - Despacho, Rastreio e Liberação da Custódia
+
+    Person(vendedor, "Empresa Vendedora", "Indústria que publica a sobra, agenda a coleta e despacha o lote")
+    Person(comprador, "Empresa Compradora", "Coletora que recebe o lote e confere a entrega")
+
+    System_Ext(transportadora, "API da Transportadora", "Executa o transporte físico e envia eventos de rastreio")
+    System_Ext(escrow, "Gateway de Escrow", "Mantém o valor em custódia e libera, congela ou estorna")
+    System_Ext(canais, "Provedor de E-mail e Push", "Entrega de notificações transacionais")
+
+    System_Boundary(mkt, "Marketplace B2B de Sobras") {
+        Container(spa, "Portal Web", "React 18 + TypeScript", "Agendamento de coleta, acompanhamento do rastreio e conferência da entrega")
+        Container(api, "Marketplace API", "Node.js 20 + NestJS", "Módulos Proposta, Transacao e Remessa; RemessaService e agregado Remessa (máquina de estados)")
+        Container(worker, "Notificacao Worker", "Node.js 20", "Consome eventos de domínio e dispara notificações")
+        ContainerQueue(mq, "Message Broker", "RabbitMQ 3.13", "Exchange topic marketplace.events com filas duráveis e DLQ")
+        ContainerDb(db, "Banco do Marketplace", "PostgreSQL 16", "Tabelas remessa, checkpoint e outbox")
+    }
+
+    Rel(vendedor, spa, "Agenda a coleta e acompanha a remessa", "HTTPS")
+    Rel(comprador, spa, "Acompanha o rastreio e confere a entrega", "HTTPS")
+    Rel(spa, api, "agendarColeta e conferirEntrega", "HTTPS / REST JSON, JWT")
+    Rel(api, db, "Lê e grava Remessa, checkpoints e outbox", "SQL / TCP 5432")
+    Rel(api, transportadora, "solicitarColeta(req)", "HTTPS REST, TLS 1.3")
+    Rel(transportadora, api, "webhookRastreio(CheckpointDTO)", "HTTPS REST, assinatura HMAC-SHA256")
+    Rel(api, escrow, "liberarCustodia, congelarCustodia e estornarCustodia com Idempotency-Key", "HTTPS REST, TLS 1.3")
+    Rel(api, mq, "Publica eventos de domínio via Outbox", "AMQP 0-9-1 assíncrono")
+    Rel(mq, worker, "Entrega eventos de domínio", "AMQP 0-9-1")
+    Rel(worker, canais, "Envia e-mail e push", "HTTPS REST")
+
+    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")

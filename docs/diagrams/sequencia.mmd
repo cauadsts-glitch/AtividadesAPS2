@@ -1,0 +1,88 @@
+sequenceDiagram
+    autonumber
+    actor Vendedor as Empresa Vendedora
+    actor Comprador as Empresa Compradora
+    participant RemessaService as RemessaService<br/>«Service»
+    participant Remessa as Remessa<br/>«Aggregate»
+    participant TransportadoraAPI as TransportadoraAPI<br/>«Externo»
+    participant EscrowAPI as EscrowAPI<br/>«Externo»
+    participant EventBus as EventBus<br/>«RabbitMQ»
+    participant NotificacaoWorker as NotificacaoWorker<br/>«Consumer»
+
+    Note over Vendedor,RemessaService: FASE 1 - Agendamento da coleta<br/>Pré-condição (Sprint 2): proposta PAGA_EM_CUSTODIA e Remessa criada
+
+    Vendedor->>RemessaService: agendarColeta(cmd: AgendamentoColetaDTO)
+    RemessaService->>Remessa: iniciarAgendamento(janela: JanelaColetaDTO)
+
+    alt [estado == AGUARDANDO_AGENDAMENTO and custodia.status == RETIDA]
+        Remessa-->>RemessaService: RemessaDTO(remessaId, estado=AGUARDANDO_AGENDAMENTO, tentativas=0)
+
+        loop até coleta confirmada ou 3 tentativas recusadas
+            RemessaService->>TransportadoraAPI: solicitarColeta(req: ColetaRequestDTO)
+            TransportadoraAPI-->>RemessaService: ColetaResponseDTO(status, codigoRastreio, janelaConfirmada)
+            alt [status == CONFIRMADA]
+                RemessaService->>Remessa: confirmarColeta(codigoRastreio, janelaConfirmada)
+                Remessa-->>RemessaService: RemessaDTO(estado=COLETA_AGENDADA)
+            else [status != CONFIRMADA]
+                RemessaService->>Remessa: registrarFalhaAgendamento(motivo)
+                Remessa-->>RemessaService: RemessaDTO(estado, tentativas)
+            end
+        end
+
+        alt [estado == COLETA_AGENDADA]
+            Note over RemessaService,EventBus: Publicação via Transactional Outbox (ADR 0001)
+            RemessaService-)EventBus: publicar(evt: ColetaAgendadaEvent)
+            par notificar comprador
+                EventBus-)NotificacaoWorker: notificarComprador(evt)
+                NotificacaoWorker-)Comprador: e-mail e push com código de rastreio
+            and notificar vendedor
+                EventBus-)NotificacaoWorker: notificarVendedor(evt)
+                NotificacaoWorker-)Vendedor: e-mail e push com ordem de coleta
+            end
+        else [estado == ESTORNADA]
+            RemessaService->>EscrowAPI: estornarCustodia(req: EstornoDTO)
+            EscrowAPI-->>RemessaService: EscrowEstornoDTO(status=ESTORNADO)
+            RemessaService-)EventBus: publicar(evt: RemessaEstornadaEvent)
+            EventBus-)NotificacaoWorker: notificarComprador(evt)
+        end
+
+        RemessaService-->>Vendedor: RemessaDTO(remessaId, estado)
+    else [estado != AGUARDANDO_AGENDAMENTO or custodia.status != RETIDA]
+        Remessa--xRemessaService: EstadoInvalidoException
+        RemessaService-->>Vendedor: ErroTransacaoDTO(codigo, mensagem)
+    end
+
+    Note over TransportadoraAPI,RemessaService: FASE 2 - Rastreio do transporte físico<br/>Webhooks validados por HMAC-SHA256 (ADR 0001)
+
+    loop a cada checkpoint de rastreio até status == ENTREGUE
+        TransportadoraAPI-)RemessaService: webhookRastreio(evt: CheckpointDTO)
+        RemessaService->>Remessa: registrarCheckpoint(cp: CheckpointDTO)
+        Remessa-->>RemessaService: RemessaDTO(estado, ultimaPosicao)
+    end
+
+    RemessaService-)EventBus: publicar(evt: EntregaRegistradaEvent)
+    EventBus-)NotificacaoWorker: notificarComprador(evt)
+    NotificacaoWorker-)Comprador: e-mail e push para conferir a entrega
+
+    Note over Comprador,EscrowAPI: FASE 3 - Conferência e liberação da custódia<br/>Pré-condição: estado == AGUARDANDO_CONFERENCIA
+
+    Comprador->>RemessaService: conferirEntrega(cmd: ConferenciaDTO)
+    RemessaService->>Remessa: registrarConferencia(cmd: ConferenciaDTO)
+    Remessa-->>RemessaService: ConferenciaResultadoDTO(resultado)
+
+    alt [resultado == APROVADA]
+        RemessaService->>EscrowAPI: liberarCustodia(req: LiberacaoDTO)
+        EscrowAPI-->>RemessaService: EscrowLiberacaoDTO(status=LIBERADO)
+        RemessaService->>Remessa: concluir(transacaoId)
+        Remessa-->>RemessaService: RemessaDTO(estado=CONCLUIDA)
+        RemessaService-)EventBus: publicar(evt: RemessaConcluidaEvent)
+        EventBus-)NotificacaoWorker: notificarVendedor(evt)
+    else [resultado == REPROVADA]
+        RemessaService->>EscrowAPI: congelarCustodia(req: CongelamentoDTO)
+        EscrowAPI-->>RemessaService: EscrowCongelamentoDTO(status=CONGELADO)
+        RemessaService->>Remessa: abrirDisputa(motivo)
+        Remessa-->>RemessaService: RemessaDTO(estado=EM_DISPUTA)
+        RemessaService-)EventBus: publicar(evt: DisputaAbertaEvent)
+    end
+
+    RemessaService-->>Comprador: ConferenciaResultadoDTO(remessaId, estado)

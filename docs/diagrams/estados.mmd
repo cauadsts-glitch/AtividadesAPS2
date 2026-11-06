@@ -1,0 +1,36 @@
+stateDiagram-v2
+    [*] --> AguardandoAgendamento
+
+    state AguardandoAgendamento
+    AguardandoAgendamento : do / aguardarJanelaDeColeta()
+    AguardandoAgendamento : exit / encerrarPendenciaDeAgendamento()
+    AguardandoAgendamento --> AguardandoAgendamento : coletaRecusada [tentativas ≤ 2] / registrarFalhaAgendamento()
+    AguardandoAgendamento --> Estornada : coletaRecusada [tentativas ≥ 3] / registrarFalhaAgendamento()
+    AguardandoAgendamento --> ColetaAgendada : coletaConfirmada [transportadora.status == CONFIRMADA] / confirmarColeta()
+
+    state ColetaAgendada
+    ColetaAgendada : entry / publicarColetaAgendadaEvent()
+    ColetaAgendada --> EmTransito : checkpointRecebido [status == COLETADO] / registrarCheckpoint()
+
+    state EmTransito {
+        [*] --> Coletado
+        Coletado --> EmRota : checkpointRecebido [status == EM_TRANSITO] / registrarCheckpoint()
+        EmRota : do / monitorarRastreio()
+        EmRota --> EmRota : checkpointRecebido [status == EM_TRANSITO] / registrarCheckpoint()
+    }
+
+    EmTransito --> AguardandoConferencia : checkpointRecebido [status == ENTREGUE] / registrarCheckpoint()
+
+    state AguardandoConferencia
+    AguardandoConferencia : entry / publicarEntregaRegistradaEvent()
+    AguardandoConferencia : exit / registrarResultadoDaConferencia()
+    AguardandoConferencia --> Concluida : conferirEntrega [qtdRecebida == qtdProposta and custodia.status == RETIDA] / concluir()
+    AguardandoConferencia --> EmDisputa : conferirEntrega [qtdRecebida != qtdProposta] / abrirDisputa()
+
+    state EmDisputa
+    EmDisputa : do / aguardarLaudo()
+    EmDisputa --> Concluida : laudoEmitido [decisao == VENDEDOR] / concluir()
+    EmDisputa --> Estornada : laudoEmitido [decisao == COMPRADOR] / estornar()
+
+    Concluida --> [*]
+    Estornada --> [*]
